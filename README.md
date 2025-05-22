@@ -1,5 +1,5 @@
 # Time-Series-Analysis-of-MLB-Attendance
-This is my final project for my Predictive Analytics class at the University of Notre Dame, completed with my classmates Quinn Brennan and Peter Nicklow. 
+This is my final project for my Predictive Analytics class at the University of Notre Dame, completed with my classmates Quinn Brennan and Peter Nicklow. The project was coded in R as a Markdown file.
 
 ## Data
 The dataset used can be found in the file `games.csv` and was sourced from Kaggle. The first step in this project was data cleansing. In order to prepare the data to accurately perform time-series analysis to predict attendance, we had to remove several unnecessary variables, account for outliers and inaccurate data, and deal with stadiums that had been renamed or entered into the dataset improperly. Additionally, in order to standardize the results, we had to enter the total attendance capacity at every MLB stadium and create a new variable that calculates the percentage of capacity filled by the fans. After performing these data cleansing and preparation steps, we were ready to perform our time-series analysis. 
