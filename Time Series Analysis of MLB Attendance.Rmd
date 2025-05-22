@@ -1,0 +1,1086 @@
+---
+title: "Predictive Analytics Final Project"
+author: "Tommy Tight, Quinn Brennan, Peter Nicklow"
+date: "2024-04-12"
+output: html_document
+---
+
+```{r setup, include= FALSE, message=FALSE, error=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(forecast)
+library(tidyverse)
+```
+
+
+#### Preliminary Data Cleansing
+```{r}
+#read in data
+baseball <- read_csv("games.csv")
+
+#Selecting only the columns that will be valuable for our study 
+baseball <- baseball %>%
+  select(attendance, 
+         away_team, 
+         date, 
+         home_team, 
+         start_time, 
+         venue_name, 
+         weather,
+         delay)
+
+#Inspecting dataset to make sure variables are stored as the correct variable
+#type
+glimpse(baseball)
+
+#gathering initial information about our dataset
+summary(baseball)
+
+#Takeaways: 
+# There is an outlier in the delay, that we will remove and there are some games
+#with an attendance of 0. We are also going to remove these observations. 
+#Finally, there are some games played at non-MLB stadiums, so we are going to 
+#remove these observations as well. 
+
+
+#Removing the row with the delay outlier, data about games played at a non-MLB 
+#stadium, and games where attendance wasn't recorded. 
+
+baseball <- baseball %>%
+filter(venue_name != "BB&T Ballpark" &
+venue_name != "Estadio de Beisbol Monterrey" &
+venue_name != "Fort Bragg Field" &
+venue_name != "Hiram Bithorn Stadium" &
+venue_name != "Williamsport Little League Classic" &
+attendance > 2 &
+delay < 1000)
+
+#In observing the data set, we also noticed that there are 34 venue names but
+#only 30 MLB teams. We quickly realized that the extra four stadiums were
+#repeated stadiums that had simply been renamed. We want the stadiums with the
+#same capacity to have the same name, so we will have to rename the duplicate 
+#stadiums
+
+# Renaming Duplicate Stadiums
+baseball <- baseball %>%
+mutate(venue_name = ifelse(
+venue_name == "Angel Stadium of Anaheim", "Angel Stadium", ifelse(
+venue_name == "U.S. Cellular Field", "Guaranteed Rate Field", ifelse(
+venue_name == "O.co Coliseum", "Oakland Coliseum", venue_name))))
+# the braves have two stadiums, but the capacity changes, so we have to keep
+# both
+
+
+#Creating an attendance capacity column that will list the total stadium 
+#capacity of the home team's stadium.
+baseball <- baseball %>%
+mutate(stadium_capacity = ifelse
+(venue_name == "Angel Stadium",45517, ifelse(
+venue_name == "AT&T Park",41265, ifelse(
+venue_name == "Busch Stadium",44383, ifelse(
+venue_name == "Chase Field", 48405, ifelse(
+venue_name == "Citi Field", 41922, ifelse(
+venue_name == "Citizens Bank Park", 42901, ifelse(
+venue_name == "Comerica Park", 41083, ifelse(
+venue_name == "Coors Field", 46897, ifelse(
+venue_name == "Dodger Stadium", 56000, ifelse(
+venue_name == "Fenway Park", 37755, ifelse(
+venue_name == "Globe Life Park in Arlington", 48114, ifelse(
+venue_name == "Great American Ball Park", 43500, ifelse(
+venue_name == "Guaranteed Rate Field", 40615, ifelse(
+venue_name == "Kauffman Stadium", 37903, ifelse(
+venue_name == "Marlins Park", 37442, ifelse(
+venue_name == "Miller Park", 41900, ifelse(
+venue_name == "Minute Maid Park", 41168, ifelse(
+venue_name == "Nationals Park", 41339, ifelse(
+venue_name == "Oakland Coliseum", 56782, ifelse(
+venue_name == "Oriole Park at Camden Yards", 44970, ifelse(
+venue_name == "Petco Park", 40209, ifelse(
+venue_name == "PNC Park", 38747, ifelse(
+venue_name == "Progressive Field", 34830, ifelse(
+venue_name == "Rogers Centre", 49286, ifelse(
+venue_name == "Safeco Field", 47929, ifelse(
+venue_name == "SunTrust Park", 41084, ifelse(
+venue_name == "Target Field", 38544, ifelse(
+venue_name == "Tropicana Field", 42735, ifelse(
+venue_name == "Turner Field", 49586, ifelse(
+venue_name == "Wrigley Field", 41649, ifelse(
+venue_name == "Yankee Stadium", 46537, 0)
+)))))))))))))))))))))))))))))), .after = venue_name)
+
+
+# Creating a new variable that will calculate the percentage of attendance
+baseball <- baseball %>%
+mutate(capacity_perc =
+round(100 * attendance / stadium_capacity, 2),
+.after = stadium_capacity)
+
+
+# Max the capacity at 100%
+baseball <- baseball %>%
+mutate(capacity_perc = ifelse(capacity_perc >= 100, 100, capacity_perc))
+
+# we want to split weather into two columns: temperature and precipitation
+baseball <- baseball %>%
+separate(weather, into = c("temperature", "precipitation"), sep = ",")
+
+stadium_avg_perc_capacity <- aggregate(baseball$capacity_perc ~ 
+                                         baseball$venue_name, 
+                                       data = baseball, 
+                                       FUN = mean)
+stadium_avg_perc_capacity 
+# 30 teams, braves have 2 stadiums
+
+# we want to make temperature only the degree
+baseball <- baseball %>%
+mutate(temperature = parse_number(temperature))
+
+# we want to make a precipitation a binary variable
+baseball <- baseball %>%
+mutate(precipitation = ifelse(
+precipitation == " rain", "Yes", ifelse(
+precipitation == " snow", "Yes", ifelse(
+precipitation == " drizzle", "Yes", "No"))))
+
+```
+
+
+#### Summary Statistics 
+```{r}
+#Gathering summary statistics after completing our data cleansing
+summary(baseball)
+
+
+mean(baseball$capacity_perc)
+# the average stadium fills up 68.8% of their total capacity
+
+# plotting average stadium capacity by stadium 
+ggplot(stadium_avg_perc_capacity, 
+       aes(x = `baseball$venue_name`, 
+           y = `baseball$capacity_perc`)) +
+geom_bar(stat = "identity", fill = "indianred") +
+labs(title = "Average Capacity Percentage For Each Stadium", 
+     x = "Stadium", 
+     y = "Capacity Percentage") +
+theme_bw() +
+theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0 ))
+
+
+# plotting capacity percentage on temperature as an independent variable
+temp_avg_perc_capacity <- aggregate(baseball$capacity_perc ~ 
+                                      baseball$temperature, 
+                                    data = baseball, 
+                                    FUN = mean)
+ggplot(temp_avg_perc_capacity,
+       aes(x = `baseball$temperature`,
+           y = `baseball$capacity_perc`)) +
+geom_point(stat = "identity") +
+labs(title = "Average Capacity Percentage By Temperature",
+     x = "Temperature", 
+     y = "Capacity Percentage") +
+theme_bw() +
+theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0 )) +
+geom_smooth(method = "lm", 
+            formula = y ~ poly(x,2), 
+            se = FALSE, 
+            color = "steelblue")
+
+
+# plotting capacity percentage on precipitation as an independent variable
+precipitation_avg_perc_capacity <- aggregate(baseball$capacity_perc ~ 
+                                               baseball$precipitation, 
+                                             data = baseball, 
+                                             FUN = mean)
+ggplot(precipitation_avg_perc_capacity, 
+       aes(x = `baseball$precipitation`,
+           y = `baseball$capacity_perc`)) +
+geom_bar(stat = "identity", fill = "mediumpurple3") +
+labs(title = "Average Capacity Percentage By Precipitation", 
+     x = "Precipitation", 
+     y = "Capacity Percentage") +
+theme_bw() +
+theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0 ))
+
+
+# plotting capcity percentage on delay as an independent variable
+delay_avg_perc_capacity <- aggregate(baseball$capacity_perc ~ baseball$delay, 
+                                     data = baseball, 
+                                     FUN = mean)
+ggplot(delay_avg_perc_capacity, aes(x = `baseball$delay`, 
+                                    y = `baseball$capacity_perc`)) +
+geom_point(stat = "identity") +
+labs(title = "Average Capacity Percentage By Delay", 
+     x = "Delay",
+     y = "Capacity Percentage") +
+theme_bw() +
+theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0 )) +
+geom_smooth(method = "lm", se = FALSE, color = "palegreen4")
+```
+
+## Wrigley Field Analysis
+
+#### Wrigley Data Time-Series Descriptive Analytics
+```{r}
+#Extracting only data from Wrigley Field
+wrigley_data <- baseball %>%
+  filter(venue_name == "Wrigley Field")
+
+
+#Creating dummy variables for the week, month, and start time data that we will
+#use to try to detrend the data before making our model. 
+wrigley_data$day_dummy <- weekdays(wrigley_data$date)
+
+wrigley_data$month_dummy <- month(wrigley_data$date)
+
+wrigley_data <- wrigley_data %>%
+  mutate(time_dummy = case_when(hour(start_time) >= 12 & 
+                                  hour(start_time) < 18  ~ "noon",
+                                hour(start_time) >= 18 & 
+                                  hour(start_time) < 24  ~ "night"
+                                ))
+
+#changing the dummy variables into factor variables 
+wrigley_data$day_dummy <-
+  factor(wrigley_data$day_dummy, 
+         levels = c("Sunday", 
+                    "Monday", 
+                    "Tuesday", 
+                    "Wednesday", 
+                    "Thursday", 
+                    "Friday", 
+                    "Saturday"),
+         labels = c(1, 2, 3, 4, 5, 6, 7))
+
+wrigley_data$month_dummy <-
+  factor(wrigley_data$month_dummy, 
+         levels = c(4, 5, 6, 7, 8, 9, 10),
+         labels = c(4, 5, 6, 7, 8, 9, 10))
+
+
+wrigley_data$time_dummy <- as.factor(wrigley_data$time_dummy)
+
+
+#Creating time series data for the capacity percentage for Wrigley Field that
+#we are analyzing. We are also plotting the result to see all time-based 
+#components that could be present.
+wrig_cap_perc_ts <- ts(wrigley_data$capacity_perc)
+plot(wrig_cap_perc_ts, 
+     type = 'l', 
+     col= "dodgerblue3", 
+     xlab = "Game Number" , 
+     ylab = "Capacity Percentage", 
+     main = "Wrigley Field Percentage of Capacity over Time")
+
+#The Wrigley Field plot has a clear linear trend as well as strong seasonality 
+#present. 
+
+
+```
+
+
+
+
+#### Checking Wrigley Data Independent Variable Relationships with the Dependent Variable
+
+```{r}
+#Creating a correlation matirx for the wrigley data and the independent 
+#variables
+wrig_matrix <- as.matrix(wrigley_data[, c(8, 9, 11)])
+cor(wrig_matrix)
+
+# Takeaways: 
+  # the correlation between capacity percentage at Wrigley and temperature is 
+  # moderate and positive.
+
+  # the correlation between capacity percentage at Wrigley and delay is low and 
+  #positive.
+
+
+# creating variables to account for stadium precipitation related to capacity 
+# percentage
+
+wrigley_precip <- wrigley_data %>%
+  group_by(precipitation) %>%
+  summarise(avg_cap_perc = mean(capacity_perc))
+
+print(wrigley_precip)
+
+#The capacity percentage for Wrigley Field with precipitation was slightly lower
+#(~2%) than without precipitation.
+#Shows that precipitation is slightly correlated with capacity percentage
+
+
+```
+
+
+#### Detrending Wrigley Data
+```{r}
+#Removing day and month seasonality
+wrig_dt_1 <- tslm(wrig_cap_perc_ts ~ 
+                    wrigley_data$day_dummy +
+                    wrigley_data$month_dummy +
+                    wrigley_data$time_dummy)
+summary(wrig_dt_1)
+plot(wrig_dt_1$residuals, 
+     type = "l", 
+     col = "dodgerblue3", 
+     main = "Wrigley Seasonal Detrend")
+
+#The time dummy was not significant 
+
+#Removing quadratic + cubic trend
+wrig_dt_2 <- tslm(wrig_cap_perc_ts ~ 
+                    wrigley_data$day_dummy + wrigley_data$month_dummy + 
+                    I(trend^2) +  I(trend^3))
+summary(wrig_dt_2)
+plot(wrig_dt_2$residuals, 
+     type = "l", 
+     col = "dodgerblue3", 
+     main = "Wrigley Seasonal, Quadratic, & Cubic Detrend")
+
+
+# Removing linear trend
+wrig_dt_3 <- tslm(wrig_cap_perc_ts ~ 
+                    wrigley_data$day_dummy + wrigley_data$month_dummy + 
+                    I(trend^2)  +  I(trend^3) + 
+                    trend)
+summary(wrig_dt_3)
+plot(wrig_dt_3$residuals, 
+     type = "l", 
+     col = "dodgerblue3", 
+     main = "Wrigley Seasonal, Quadratic, Cubic, & Linear  Detrend")
+
+wrig_sig <- wrig_dt_3$residuals
+```
+
+# De-Trending Wrigley Independent Variables 
+```{r}
+# First,temperature
+wrig_temperature_ts <- ts(wrigley_data$temperature) 
+# 82 home games per season
+plot(wrig_temperature_ts, 
+     type = "l", 
+     col = "dodgerblue3", 
+     main = "Wrigley Temperature Time Series Plot")
+
+wrig_detrended_temp <- tslm(wrig_temperature_ts ~ 
+                              wrigley_data$day_dummy + wrigley_data$month_dummy)
+summary(wrig_detrended_temp)
+plot(wrig_detrended_temp$residuals, 
+     type = "l", 
+     col = "dodgerblue3", 
+     main = "Wrigley Temperature Seasonal Detrend")
+
+wrig_detrended_temp_2 <- tslm(wrig_temperature_ts ~ 
+                                wrigley_data$day_dummy + 
+                                wrigley_data$month_dummy + 
+                                I(trend^2))
+summary(wrig_detrended_temp_2)
+plot(wrig_detrended_temp_2$residuals, 
+     type = "l", 
+     col = "dodgerblue3", 
+     main = "Wrigley Temperature Seasonal & Quadratic Detrend")
+
+wrig_detrended_temp_3 <- tslm(wrig_temperature_ts ~ 
+                                wrigley_data$day_dummy +
+                                wrigley_data$month_dummy + 
+                                I(trend^2) + I(trend^3))
+summary(wrig_detrended_temp_3)
+plot(wrig_detrended_temp_3$residuals, 
+     type = "l", 
+     col = "dodgerblue3", 
+     main = "Wrigley Temperature Seasonal, Quadratic & Cubic Detrend")
+
+wrig_temp_sig <- wrig_detrended_temp_3$residuals
+# We are finished detrending the temperature variable.
+
+
+# Next, delay
+wrig_delay_ts <- ts(wrigley_data$delay)
+# 82 home games per season
+plot(wrig_delay_ts, 
+     type = "l", 
+     col = "dodgerblue3", 
+     main = "Wrigley Delay Time Series Plot")
+# There is no further time series de-trending to do. 
+```
+
+#### ARMAX Process For Wrigley
+```{r}
+
+# ACF and PACF of residuals
+par(mfrow = c(1,2))
+wrig_ACF <- Acf(wrig_sig, col = 'indianred3', main = "ACF Function")
+wrig_PACF <- Pacf(wrig_sig, col = 'plum3', main = "PACF Function")
+# AR: None
+# MA: 1
+
+
+# Now, we are going to make a new data table with the our de-trended variables
+wrig_armax_data  <- data.frame(wrig_sig, 
+                               wrig_temp_sig, 
+                               wrig_delay_ts)
+format(cor(wrig_armax_data, use = "complete.obs"), digits = 4)
+
+# Create the ARMAX
+wrig_armax_1 <- Arima(ts(wrig_armax_data[1:246,1]), 
+                      order = c(0, 0, 1), 
+                      xreg = as.matrix(wrig_armax_data[1:246, -1])) #246 is 3 seasons
+
+# Check to see if ARMAX removed all time-related influence
+par(mfrow = c(1,2))
+wrig_ACF_2 <- Acf(wrig_armax_1$residuals, 
+                  col = 'indianred3', main = "ACF of the ARMAX Residuals")
+wrig_PACF_2 <- Pacf(wrig_armax_1$residuals,
+                    col = 'plum3', main = "PACF of the ARMAX Residuals")
+# AR: 7
+# MA: 7
+
+# Create another ARMAX
+wrig_armax_2 <- Arima(ts(wrig_armax_data[1:246,1]), 
+                      order = c(7, 0, 7), 
+                      xreg = as.matrix(wrig_armax_data[1:246, -1])) #246 is 3 seasons
+
+# Check to see if ARMAX_2 removed all time-related influence
+par(mfrow = c(1,2))
+wrig_ACF_3 <- Acf(wrig_armax_2$residuals, col = 'indianred3', 
+                  main = "ACF of the ARMAX_2 Residuals")
+wrig_PACF_3 <- Pacf(wrig_armax_2$residuals, col = 'plum3', 
+                    main = "PACF of the ARMAX_2 Residuals")
+
+
+
+
+# Forecasting Wrigley
+# validation data is 325-244=81, 
+
+wrig_nvalid <- 81
+wrig_forecast <- predict(wrig_armax_2, 
+                        newxreg = as.matrix(wrig_armax_data[245:325, -1]), 
+                        h = 81)
+
+#Creating training forecast
+wrig_train_noise <- wrig_dt_3$fitted.values[1:244]
+wrig_train_signal <- wrig_armax_2$fitted[1:244]
+wrig_train_total <- wrig_train_signal+wrig_train_noise
+
+#Creating validation forecast
+wrig_valid_noise <- wrig_dt_3$fitted.values[245:325]
+wrig_valid_signal <- wrig_forecast$pred
+wrig_valid_total <- wrig_valid_signal+wrig_valid_noise
+
+
+
+#Visualizing Forecast 
+par(mfrow = c(1,1))
+plot(wrig_cap_perc_ts, 
+     ylab = "Percent Capacity Filled",
+     xlim = c(1,325),
+     ylim = c(55,120), 
+     xlab = "Game Number", 
+     type = "l", 
+     main = "Wrigley ARMAX Prediction", 
+     lty = 2)
+lines(wrig_train_total, lwd = 2, col = "indianred3")
+lines(wrig_valid_total, lwd = 2, col = "dodgerblue3")
+lines(c(244, 244), c(0, 120))
+legend("bottomleft", 
+       inset = c(0, 0), 
+       legend = c("ARMAX on Training Data", "ARMAX on Validation Data"), 
+       col = c("indianred3", "dodgerblue3"), 
+       pch = 1, 
+       cex = 0.5)
+text(125,112.5, "Training Data")
+text(290, 112.5, "Validation Data")
+
+```
+
+#### Improving Wrigley ARMAX Model
+```{r}
+#Our original ARMAX model prediction on the validation data was not very good. 
+#This is due to the fact that the data starts at a much lower value than average
+#and right when our validation data starts, there is a similar dip. We are
+#going to subset the data to try to make our prediciton more accurate. 
+
+wrig_subset <- wrigley_data[20:325,]
+
+wrig_cap_perc_ts_2 <- ts(wrig_subset$capacity_perc)
+
+#Detrending wrig subset
+#Removing day and month seasonality
+wrig_sub_dt_1 <- tslm(wrig_cap_perc_ts_2 ~ 
+                    wrig_subset$day_dummy +
+                    wrig_subset$month_dummy +
+                    wrig_subset$time_dummy)
+summary(wrig_sub_dt_1)
+plot(wrig_sub_dt_1$residuals, 
+     type = "l", 
+     col = "dodgerblue3", 
+     main = "Wrigley Seasonal Detrend")
+
+#The time dummy was not significant 
+
+#Removing quadratic + cubic trend
+wrig_sub_dt_2 <- tslm(wrig_cap_perc_ts_2 ~ 
+                    wrig_subset$day_dummy + wrig_subset$month_dummy + 
+                    I(trend^2) +  I(trend^3))
+summary(wrig_sub_dt_2)
+plot(wrig_sub_dt_2$residuals, 
+     type = "l", 
+     col = "dodgerblue3", 
+     main = "Wrigley Seasonal, Quadratic, & Cubic Detrend")
+
+
+# Removing linear trend
+wrig_sub_dt_3 <- tslm(wrig_cap_perc_ts_2 ~ 
+                    wrig_subset$day_dummy + wrig_subset$month_dummy + 
+                    I(trend^2)  +  I(trend^3) + 
+                    trend)
+summary(wrig_sub_dt_3)
+plot(wrig_sub_dt_3$residuals, 
+     type = "l", 
+     col = "dodgerblue3", 
+     main = "Wrigley Seasonal, Quadratic, Cubic, & Linear  Detrend")
+
+#Attempting to remove cyclic trends
+wrig_sub_t <- seq(1,306)
+wrig_sub_cyc_1 <- sin(2*pi*wrig_sub_t/120)
+wrig_sub_cyc_2 <- cos(2*pi*wrig_sub_t/120)
+wrig_sub_dt_4 <- tslm(wrig_cap_perc_ts_2 ~ 
+                    wrig_subset$day_dummy + wrig_subset$month_dummy + 
+                    I(trend^2)  +  I(trend^3) + 
+                    trend + wrig_sub_cyc_1 + wrig_sub_cyc_2)
+summary(wrig_sub_dt_4)
+plot(wrig_sub_dt_4$residuals, 
+     type = "l", 
+     col = "dodgerblue3", 
+     main = "Wrigley Seasonal, Quadratic, Cubic, & Linear  Detrend")
+
+wrig_sub_sig <- wrig_sub_dt_4$residuals
+```
+
+#### Build Wrigley Subset Armax
+```{r}
+# ACF and PACF of residuals
+par(mfrow = c(1,2))
+wrig_sub_ACF <- Acf(wrig_sub_sig, 
+                    col = 'indianred3', 
+                    main = "ACF Function")
+wrig_sub_PACF <- Pacf(wrig_sub_sig, 
+                      col = 'plum3', 
+                      main = "PACF Function")
+# AR: 15
+# MA: 1
+
+
+# Now, we are going to make a new data table with the our de-trended variables
+wrig_sub_armax_data  <- data.frame(wrig_sub_sig, 
+                               wrig_temp_sig[20:325], 
+                               wrig_delay_ts[20:325])
+format(cor(wrig_sub_armax_data, use = "complete.obs"), digits = 4)
+
+# Create the ARMAX
+wrig_sub_armax_1 <- Arima(ts(wrig_sub_armax_data[1:225,1]), order = c(15, 0, 1), 
+                      xreg = as.matrix(wrig_sub_armax_data[1:225, -1])) #225 allows validation data to be one full season
+
+# Check to see if ARMAX removed all time-related influence
+par(mfrow = c(1,2))
+wrig_sub_ACF_2 <- Acf(wrig_sub_armax_1$residuals, 
+                      col = 'indianred3', 
+                      main = "ACF of the ARMAX Residuals")
+wrig_sub_PACF_2 <- Pacf(wrig_sub_armax_1$residuals, 
+                        col = 'plum3', 
+                        main = "PACF of the ARMAX Residuals")
+# AR: None
+# MA: None
+
+
+# Forecasting Wrigley Subset
+# validation data is 306-225=81, 
+
+wrig_nvalid <- 81
+wrig_sub_forecast <- predict(wrig_sub_armax_1, 
+                        newxreg = as.matrix(wrig_sub_armax_data[226:306, -1]), 
+                        h = 81)
+
+#Creating training forecast
+wrig_sub_train_noise <- wrig_sub_dt_4$fitted.values[1:225]
+wrig_sub_train_signal <- wrig_sub_armax_1$fitted[1:225]
+wrig_sub_train_total <- wrig_sub_train_signal+wrig_sub_train_noise
+
+#Creating validation forecast
+wrig_sub_valid_noise <- wrig_sub_dt_4$fitted.values[226:306]
+wrig_sub_valid_signal <- wrig_sub_forecast$pred
+wrig_sub_valid_total <- wrig_sub_valid_signal+wrig_sub_valid_noise
+
+
+
+#Visualizing Forecast 
+par(mfrow = c(1,1))
+plot(wrig_cap_perc_ts_2, 
+     ylab = "Percent Capacity Filled",
+     xlim = c(1,306),
+     ylim = c(55,120), 
+     xlab = "Game Number", 
+     type = "l", 
+     main = "Wrigley Subset ARMAX Prediction", 
+     lty = 2)
+lines(wrig_sub_train_total, lwd = 2, col = "indianred3")
+lines(wrig_sub_valid_total, lwd = 2, col = "dodgerblue3")
+lines(c(225, 225), c(0, 140))
+legend("bottomleft", 
+       inset = c(0, 0), 
+       legend = c("ARMAX on Training Data", "ARMAX on Validation Data"), 
+       col = c("indianred3", "dodgerblue3"), 
+       pch = 1, 
+       cex = 0.5)
+text(105,112.5, "Training Data")
+text(270, 112.5, "Validation Data")
+
+```
+
+
+#### Wrigley Model Summary
+```{r}
+summary(wrig_sub_armax_1)
+```
+
+## Oakland Coliseum Data Analysis
+
+#### Oakland Data Time-Series Descriptive Analytics
+```{r}
+#Making dataframes for the specific Oakland Coliseum stadium that we want to 
+#analyze
+oakland_data <- baseball %>%
+  filter(venue_name == "Oakland Coliseum")
+
+
+#Creating dummy variables for the week, month, and start time data that we will
+#use to try to detrend the data before making our model.
+oakland_data$day_dummy <- weekdays(oakland_data$date)
+
+oakland_data$month_dummy <- month(oakland_data$date)
+
+
+oakland_data <- oakland_data %>%
+  mutate(time_dummy = case_when(hour(start_time) >= 12 & 
+                                  hour(start_time) < 18  ~ "noon",
+                                hour(start_time) >= 18 & 
+                                  hour(start_time) < 24  ~ "night"
+                                ))
+
+oakland_data <- oakland_data %>%
+  mutate(oakland_spiked_dummy = ifelse(row_number() %% 50 == 0, 1, 0))
+
+#Changing the dummy variables into factor variables 
+oakland_data$day_dummy <-
+  factor(oakland_data$day_dummy, 
+         levels = c("Sunday", 
+                    "Monday", 
+                    "Tuesday", 
+                    "Wednesday", 
+                    "Thursday", 
+                    "Friday", 
+                    "Saturday"),
+         labels = c(1, 2, 3, 4, 5, 6, 7))
+
+oakland_data$month_dummy <-
+  factor(oakland_data$month_dummy, 
+         levels = c(4, 5, 6, 7, 8, 9, 10),
+         labels = c(4, 5, 6, 7, 8, 9, 10))
+
+oakland_data$time_dummy <- as.factor(oakland_data$time_dummy)
+
+
+oakland_data$oakland_spiked_dummy <- 
+  as.factor(oakland_data$oakland_spiked_dummy)
+
+#Creating time series data for the capacity percentage for the Oakland Coliseum 
+#that we are analyzing. We are also plotting the result to see all time-based 
+#components that could be present.
+oak_cap_perc_ts <- ts(oakland_data$capacity_perc)
+plot(oak_cap_perc_ts, 
+     type = 'l', 
+     col ="darkgreen", 
+     xlab = "Game Number", 
+     ylab = "Capacity Percentage", 
+     main = "Oakland Coliseum Percentage of Capacity over Time")
+
+#The Oakland Coliseum plot has some seasonality as well as strong cyclical 
+#trends. There may be a slight linear or polynomial trend also hiding behind the
+#other trends.
+
+```
+
+
+#### Checking Oakland Data Independent Variable Relationships with the Dependent Variable
+
+```{r}
+#Creating a correlation matrix for the Oakland data and its independent 
+#variables
+oak_matrix <- as.matrix(oakland_data[, c(8, 9, 11)])
+cor(oak_matrix)
+
+# Takeaways: 
+  # the correlation between capacity percentage at Oakland and temperature is 
+  #low and positive
+
+  # the correlation between capacity percentage at Oakland and delay is low and 
+  #negative.
+
+
+oakland_precip <- oakland_data %>%
+  group_by(precipitation) %>%
+  summarise(avg_cap_perc = mean(capacity_perc))
+
+print(oakland_precip)
+#There was not a game that had precipitation in Oakland Coliseum
+
+```
+
+
+#### Detrending Oakland Data 
+```{r}
+#Trying to difference/take the log of the data to make it stationary
+log_oak <- log(oak_cap_perc_ts)
+diff_oak <- diff(oak_cap_perc_ts)
+
+#Removing day and month seasonality
+oak_dt_1 <- tslm(diff_oak ~ 
+                   oakland_data$day_dummy[-323] + 
+                   oakland_data$month_dummy[-323])
+summary(oak_dt_1)
+plot(oak_dt_1$residuals, 
+     type = "l", 
+     col = "darkgreen", 
+     main = "Oakland Seasonal Detrend")
+
+
+oak_dt_2 <- tslm(diff_oak ~ 
+                   oakland_data$day_dummy[-323] + oakland_data$month_dummy[-323] + 
+                   oakland_data$oakland_spiked_dummy[-323])
+summary(oak_dt_2)
+plot(oak_dt_2$residuals, 
+     type = "l", 
+     col = "darkgreen", 
+     main = "Oakland Seasonal + Cyclical Detrend")
+
+#Removing cyclical trend
+oak_t <- seq(1:323)
+oak_cyc_1 <- sin(pi*oak_t/81)
+oak_cyc_2 <- cos(pi*oak_t/81)
+
+# just trying it with everything to see what happens
+oak_dt_3 <- tslm(log_oak ~ 
+                   oakland_data$day_dummy + oakland_data$month_dummy +
+                   oak_cyc_1 + oak_cyc_2 + 
+                   I(trend^2) +  I(trend^3) + 
+                   trend)
+summary(oak_dt_3)
+plot(oak_dt_3$residuals, 
+     type = "l", 
+     col = "darkgreen", 
+     main = "Oakland Seasonal + Cyclical + Quadratic + Cubic + Linear Detrend")
+
+
+
+
+
+```
+
+
+The Oakland data is not stationary. We tried several methods to make the data stationary, including, differencing the data, taking the log of the data, detrending on start time, day of the week, month of the year, and making a dummy variable that tried to account for the spikes that occur every 50 years. However, we were unable to make the data stationary with this process. Therefore, we are going to try to compare the Wrigley Field attendance to the Marlins Park attendance, which similar to the Oakland Coliseum, has very low attendance. 
+
+## Marlins Park Data Analysis
+
+
+#### Time-Series Manipulation for Marlins Park
+
+```{r}
+#Selecting only Marlins Park data
+marlins_data <- baseball %>%
+  filter(venue_name == "Marlins Park")
+
+#creating dummy variables for Marlins Park
+marlins_data$day_dummy <- weekdays(marlins_data$date)
+
+marlins_data$month_dummy <- month(marlins_data$date)
+
+
+marlins_data <- marlins_data %>%
+  mutate(time_dummy = as.factor(case_when(hour(start_time) >= 12 & 
+                                  hour(start_time) < 18  ~ "noon",
+                                hour(start_time) >= 18 & 
+                                  hour(start_time) < 24  ~ "night"
+                                )))
+#Making the dummy variables factor variables 
+
+marlins_data$day_dummy <-
+  factor(marlins_data$day_dummy, 
+         levels = c("Sunday", 
+                    "Monday", 
+                    "Tuesday", 
+                    "Wednesday", 
+                    "Thursday", 
+                    "Friday", 
+                    "Saturday"),
+         labels = c(1, 2, 3, 4, 5, 6, 7))
+
+marlins_data$month_dummy <-
+  factor(marlins_data$month_dummy, 
+         levels = c(4, 5, 6, 7, 8, 9, 10),
+         labels = c(4, 5, 6, 7, 8, 9, 10))
+
+#Creating a time-series plot
+mar_cap_perc_ts <- ts(marlins_data$capacity_perc)
+plot(mar_cap_perc_ts, 
+     type = 'l', 
+     col= "turquoise", 
+     xlab = "Game Number" , 
+     ylab = "Capacity Percentage", 
+     main = "Marlins Park Percentage of Capacity over Time")
+
+
+```
+
+
+#### Checking Marlins Data Independent Variable Relationships with the Dependent Variable
+
+```{r}
+mar_matrix <- as.matrix(marlins_data[, c(8, 9, 11)])
+cor(mar_matrix)
+
+# Takeaways: 
+  # the correlation between capacity percentage at Marlins Park and temperature 
+  #is low and negative.
+
+  # the correlation between capacity percentage at Marlins Park and delay is low
+  # and negative.
+
+
+marlins_precip <- marlins_data %>%
+  group_by(precipitation) %>%
+  summarise(avg_cap_perc = mean(capacity_perc))
+
+print(marlins_precip)
+#There were no games where there was precipitation at Marlins Park.
+
+```
+
+
+
+#### Detrending Marlins Park Data
+```{r}
+#Detrending for structural break
+
+marlins_data$game_count <- seq(1:320)
+marlins_sb <- seq(1:320)
+marlins_sb <- ifelse(marlins_data$game_count < 248, 0, 1)
+
+mar_dt_1 <- tslm(mar_cap_perc_ts ~ marlins_sb)
+summary(mar_dt_1)
+plot(mar_dt_1$residuals,
+     type = "l",
+     col = "turquoise",
+     main = "Marlins Structural Break Detrend")
+
+#Detrending for seasonality 
+
+mar_dt_2 <- tslm(mar_cap_perc_ts ~ marlins_sb +
+                    marlins_data$day_dummy +
+                    marlins_data$month_dummy + 
+                    marlins_data$time_dummy)
+summary(mar_dt_2)
+plot(mar_dt_2$residuals, 
+     type = "l", 
+     col = "turquoise", 
+     main = "Marlins Structural Break & Seasonal Detrend")
+
+#Removing linear trend
+mar_dt_3 <- tslm(mar_cap_perc_ts ~ marlins_sb +
+                    marlins_data$day_dummy +
+                    marlins_data$month_dummy + 
+                    marlins_data$time_dummy + 
+                   trend)
+summary(mar_dt_3)
+plot(mar_dt_3$residuals, 
+     type = "l", 
+     col = "turquoise", 
+     main = "Marlins Structural Break, Seasonal, Linear Detrend")
+
+#Removing quadratic + cubic trend
+mar_dt_4 <- tslm(mar_cap_perc_ts ~ marlins_sb +
+                    marlins_data$day_dummy +
+                    marlins_data$month_dummy + 
+                    marlins_data$time_dummy +
+                   trend + I(trend^2) + I(trend^3))
+summary(mar_dt_4)
+plot(mar_dt_4$residuals, 
+     type = "l", 
+     col = "turquoise", 
+     main = "Marlins Structural Break, Seasonal, Linear & Power Detrend")
+
+mar_sig <- mar_dt_4$residuals
+
+```
+
+
+#### Detrending Independent Variables for Marlins Park
+```{r}
+# First,temperature
+mar_temperature_ts <- ts(marlins_data$temperature) 
+# 82 home games per season
+plot(mar_temperature_ts,
+     type = "l",
+     col = "turquoise",
+     main = "Marlins Temperature Time Series Plot")
+
+#Removing seasonal trends
+mar_detrended_temp <- tslm(mar_temperature_ts ~ 
+                              marlins_data$day_dummy + marlins_data$month_dummy + marlins_data$time_dummy)
+summary(mar_detrended_temp)
+plot(mar_detrended_temp$residuals,
+     type = "l",
+     col = "turquoise",
+     main = "Marlins Temperature Seasonal Detrend")
+#Day of the week will not affect temperature, so we will remove it going forward.
+
+#Removing linear trends
+mar_detrended_temp_2 <- tslm(mar_temperature_ts ~ 
+                                marlins_data$month_dummy +  marlins_data$time_dummy+ 
+                                trend)
+summary(mar_detrended_temp_2)
+plot(mar_detrended_temp_2$residuals,
+     type = "l",
+     col = "turquoise",
+     main = "Marlins Temperature Seasonal & Linear Detrend")
+
+#Removing cyclical trends
+mar_t <- seq(1:320)
+mar_cyc_1 <- sin(pi*mar_t/60) 
+mar_cyc_2 <- cos(pi*mar_t/60)
+
+mar_detrended_temp_3 <- tslm(mar_temperature_ts ~ 
+                                marlins_data$month_dummy +  marlins_data$time_dummy+ 
+                                trend +
+                               mar_cyc_1 + mar_cyc_2)
+summary(mar_detrended_temp_3)
+plot(mar_detrended_temp_3$residuals,
+     type = "l",
+     col = "turquoise",
+     main = "Marlins Temperature Seasonal, Linear, & Cyclical Detrend")
+
+
+#Removing Power trends
+mar_detrended_temp_4 <- tslm(mar_temperature_ts ~ 
+                                marlins_data$month_dummy +  marlins_data$time_dummy+ 
+                                trend +
+                               mar_cyc_1 + mar_cyc_2 +
+                               I(trend^2) + I(trend^3))
+summary(mar_detrended_temp_4)
+plot(mar_detrended_temp_4$residuals,
+     type = "l",
+     col = "turquoise",
+     main = "Marlins Temperature Seasonal, Linear, Cyclical, & Power Detrend")
+
+mar_temp_sig <- mar_detrended_temp_4$residuals
+
+# Next, delay
+mar_delay_ts <- ts(marlins_data$delay)
+# 82 home games per season
+plot(mar_delay_ts,
+     type = "l",
+     col = "turquoise",
+     main = "Marlins Delay Time Series Plot")
+# There is no further time series de-trending to do. 
+
+```
+
+#### ARMAX Process For Marlin Park
+```{r}
+
+# ACF and PACF of residuals
+par(mfrow = c(1,2))
+mar_ACF <- Acf(mar_sig, col = 'indianred3', main = "ACF Function")
+mar_PACF <- Pacf(mar_sig, col = 'plum3', main = "PACF Function")
+# AR: None
+# MA: None
+
+#Because we have no MA or AR components, we are going to be making a maximum 
+#likelihood estimation using the Arima model so that we can still include the 
+#effects of our external regressors. 
+
+# Now, we are going to make a new data table with the our de-trended variables
+mar_armax_data  <- data.frame(mar_sig, 
+                               mar_temp_sig, 
+                               mar_delay_ts)
+
+format(cor(mar_armax_data, use = "complete.obs"), digits = 4)
+
+# Create the ARMAX
+mar_armax_1 <- Arima(ts(mar_armax_data[1:240,1]), order = c(0, 0, 0), 
+                      xreg = as.matrix(mar_armax_data[1:240, -1])) #240 is 3 seasons in this data set since there are a total of 320 games
+
+# Check to see if ARMAX removed all time-related influence
+par(mfrow = c(1,2))
+mar_ACF_2 <- Acf(mar_armax_1$residuals, col = 'indianred3', 
+                 main = "ACF of the ARMAX Residuals")
+mar_PACF_2 <- Pacf(mar_armax_1$residuals, col = 'plum3', 
+                   main = "PACF of the ARMAX Residuals")
+# AR: None
+# MA: None
+
+
+# Forecasting Marlins Park
+# validation data is 320-240=80, 
+
+mar_nvalid <- 80
+mar_forecast <- predict(mar_armax_1, 
+                        newxreg = as.matrix(mar_armax_data[241:320, -1]), 
+                        h = 80)
+
+#Creating training forecast
+mar_train_noise <- mar_dt_4$fitted.values[1:240]
+mar_train_signal <- mar_armax_1$fitted[1:240]
+mar_train_total <- mar_train_signal+mar_train_noise
+
+#Creating validation forecast
+mar_valid_noise <- mar_dt_4$fitted.values[241:320]
+mar_valid_signal <- mar_forecast$pred
+mar_valid_total <- mar_valid_signal+mar_valid_noise
+
+
+
+#Visualizing Forecast 
+par(mfrow = c(1,1))
+plot(mar_cap_perc_ts, 
+     ylab = "Percent Capacity Filled",
+     xlim = c(1,320),
+     ylim = c(0,120), 
+     xlab = "Game Number", 
+     type = "l", 
+     main = "Marlins ARMAX Prediction", 
+     lty = 2)
+lines(mar_train_total, lwd = 2, col = "indianred3")
+lines(mar_valid_total, lwd = 2, col = "turquoise")
+lines(c(240, 240), c(-10, 130))
+legend("topleft", 
+       inset = c(0, 0), 
+       legend = c("ARMAX on Training Data", "ARMAX on Validation Data"), 
+       col = c("indianred3", "turquoise"), 
+       pch = 1, 
+       cex = 0.5)
+text(120,112.5, "Training Data")
+text(285, 112.5, "Validation Data")
+
+```
+
+
+
+#### Marlins Model Summary 
+```{r}
+summary(mar_armax_1)
+```
+
+
+#### Model Assesment and Comparison 
+Looking at the graphs of our models, both models are fairly good at predicting the validation data. The caveat to that is that, we had to remove our first 20 observations of the Wrigley data to make the model more accurate. Therefore, the Marlins Park model is likely better at predicting and picking up on more drastic changes in the overall data. The Wrigley model tends to over estimate the validation data, and it does not pick up some of the lower values of the validation data. This makes sense, as on average the capacity percentage of Wrigley field tends to be higher, so the model tends to miss lower capacity percentage filled values. The Marlins Park prediction is fairly centered in the validation data, however, it does miss some unusually high values of percent capacity filled. This makes sense because, opposite of Wrigley, the Marlins attendance tends to be lower, so the prediction misses those high values. Overall, both models are fairly accurate and we are especially confident in the Marlins Park model's ability to predict the percent capacity filled at their stadium. 
